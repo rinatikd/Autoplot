@@ -1,668 +1,367 @@
 ;;; =========================================================
-;;; AutoPlot Pro v157.0 — печать активной вкладки в отдельные PDF
-;;; + самоопределение масштаба + самодиагностика + txt-лог
-;;; Команды: AUTOPLOT, APFRAMES, APDIAG, APLOG, APDEBUG
+;;; AutoPlot Pro v157.7 — компактный
+;;; Поиск рамок: INSERT + LWPOLYLINE/POLYLINE + LINE
+;;; Дедупликация: перекрытие BBox >= 80%
+;;; Печать: строго по внешней рамке, 1:1, отдельные PDF
+;;; Команды: AUTOPLOT, APFRAMES
 ;;; =========================================================
-(princ "\n[D0] Старт v157.0\n")
+(princ "\n[D0] AutoPlot v157.7\n")
 (vl-load-com)
-(princ "[D1] vl-load-com OK\n")
 
-(setq *log-path*
-      (strcat (getenv "USERPROFILE") "/Downloads/AutoPlot_log.txt"))
-(setq *diag-path*
-      (strcat (getenv "USERPROFILE") "/Downloads/AutoPlot_frames_diag.txt"))
-(setq *log-buffer* '())
-(setq *diag-buffer* '())
-(setq *log-level* 3)
-(setq *log-counts* '(0 0 0 0 0))
-(setq *log-errors* '())
-(setq *ap-scale* 1.0)
-(princ "[D2] paths OK\n")
+(setq *log-path*  (strcat (getenv "USERPROFILE") "/Downloads/AutoPlot_log.txt"))
+(setq *diag-path* (strcat (getenv "USERPROFILE") "/Downloads/AutoPlot_frames_diag.txt"))
+(setq *log-buf* '() *diag-buf* '() *log-lvl* 3)
 
-;;; ---------- Лог ----------
-(defun ap-level-name (lvl)
-  (cond ((= lvl 0) "ERROR") ((= lvl 1) "WARN ")
-        ((= lvl 2) "INFO ")  ((= lvl 3) "DEBUG")
-        ((= lvl 4) "TRACE")  (t "     ")))
-
-(defun ap-list-set (lst idx val / i out)
-  (setq i 0 out '())
-  (foreach x lst (setq out (cons (if (= i idx) val x) out)) (setq i (1+ i)))
-  (reverse out))
-
-(defun ap-count-inc (lvl / c)
-  (setq c (nth lvl *log-counts*))
-  (setq *log-counts* (ap-list-set *log-counts* lvl (1+ c))))
-
-(defun ap-write-level (lvl msg)
-  (ap-count-inc lvl)
-  (if (<= lvl *log-level*)
+(defun ap-log (lvl msg / nm)
+  (setq nm (nth lvl '("ERROR" "WARN " "INFO " "DEBUG" "TRACE")))
+  (if (<= lvl *log-lvl*)
     (progn
-      (setq line (strcat "[" (ap-level-name lvl) "] " msg))
-      (setq *log-buffer* (cons line *log-buffer*))
+      (setq line (strcat "[" nm "] " msg))
+      (setq *log-buf* (cons line *log-buf*))
       (princ (strcat line "\n")))))
 
-(defun ap-err  (msg) (ap-write-level 0 msg) (setq *log-errors* (cons msg *log-errors*)))
-(defun ap-warn (msg) (ap-write-level 1 msg))
-(defun ap-info (msg) (ap-write-level 2 msg))
-(defun ap-dbg  (msg) (ap-write-level 3 msg))
-(defun ap-trc  (msg) (ap-write-level 4 msg))
+(defun ap-w (lvl msg) (ap-log lvl msg))
+(defun ap-e (m) (ap-w 0 m))
+(defun ap-i (m) (ap-w 2 m))
+(defun ap-d (m) (ap-w 3 m))
+(defun ap-t (m) (ap-w 4 m))
 
 (defun ap-diag (line)
-  (setq *diag-buffer* (cons line *diag-buffer*))
+  (setq *diag-buf* (cons line *diag-buf*))
   (princ (strcat line "\n")))
 
-(defun ap-save-log ( / f)
-  (setq f (open *log-path* "w"))
+(defun ap-save (path buf / f)
+  (setq f (open path "w"))
   (if f
-    (progn
-      (write-line "========================================" f)
-      (write-line " AutoPlot log" f)
-      (write-line "========================================" f)
-      (foreach line (reverse *log-buffer*) (write-line line f))
-      (write-line "----------------------------------------" f)
-      (write-line (strcat "ERROR: " (itoa (nth 0 *log-counts*))) f)
-      (write-line (strcat "WARN : " (itoa (nth 1 *log-counts*))) f)
-      (write-line (strcat "INFO : " (itoa (nth 2 *log-counts*))) f)
-      (write-line (strcat "DEBUG: " (itoa (nth 3 *log-counts*))) f)
-      (write-line (strcat "TRACE: " (itoa (nth 4 *log-counts*))) f)
-      (close f)
-      (princ (strcat "\nЛог сохранён: " *log-path* "\n")))
-    (princ "\nНе удалось открыть файл лога.\n")))
+    (progn (foreach ln (reverse buf) (write-line ln f))
+           (close f) (princ (strcat "\nСохранено: " path "\n")))))
 
-(defun ap-save-diag ( / f)
-  (setq f (open *diag-path* "w"))
-  (if f
-    (progn
-      (foreach line (reverse *diag-buffer*) (write-line line f))
-      (close f)
-      (princ (strcat "\nОтчёт диагностики: " *diag-path* "\n")))
-    (princ "\nНе удалось открыть файл диагностики.\n")))
-(princ "[D3] log OK\n")
+(defun ap-try (label expr / r)
+  (setq r (vl-catch-all-apply expr))
+  (if (vl-catch-all-error-p r) (ap-e (strcat label ": " (vl-catch-all-error-message r))) r))
 
-(defun ap-try (label expr / res)
-  (setq res (vl-catch-all-apply expr))
-  (if (vl-catch-all-error-p res)
-    (progn (ap-err (strcat label ": " (vl-catch-all-error-message res))) nil)
-    res))
+;;; ГОСТ-форматы
+(setq *gost* '(("A4" 210.0 297.0) ("A3" 297.0 420.0) ("A2" 420.0 594.0)
+               ("A1" 594.0 841.0) ("A0" 841.0 1189.0)))
 
-(defun ap-send (cmd) (vl-cmdf cmd))
-(princ "[D4] helpers OK\n")
+(defun ap-fmt-full (s)
+  (cond ((= s "A4") "ISO без полей A4 (210.00 x 297.00 мм)")
+        ((= s "A3") "ISO без полей A3 (297.00 x 420.00 мм)")
+        ((= s "A2") "ISO без полей A2 (420.00 x 594.00 мм)")
+        ((= s "A1") "ISO без полей A1 (594.00 x 841.00 мм)")
+        ((= s "A0") "ISO без полей A0 (841.00 x 1189.00 мм)")
+        (t s)))
 
-;;; ---------- ГОСТ-форматы ----------
-(setq *gost-formats*
-      '(("A4" 210.0 297.0) ("A3" 297.0 420.0) ("A2" 420.0 594.0)
-        ("A1" 594.0 841.0) ("A0" 841.0 1189.0)))
-
-(defun ap-format-full (short)
-  (cond ((= short "A4") "ISO без полей A4 (210.00 x 297.00 мм)")
-        ((= short "A3") "ISO без полей A3 (297.00 x 420.00 мм)")
-        ((= short "A2") "ISO без полей A2 (420.00 x 594.00 мм)")
-        ((= short "A1") "ISO без полей A1 (594.00 x 841.00 мм)")
-        ((= short "A0") "ISO без полей A0 (841.00 x 1189.00 мм)")
-        (t short)))
-
-(defun ap-format-num (n)
+(defun ap-fmt-num (n)
   (if (numberp n)
     (if (< n 10) (strcat "0" (itoa n)) (itoa n))
     "01"))
 
-(defun ap-nice-scale-p (k / v)
-  (if (<= k 0.0) nil
-    (progn
-      (setq v k)
-      (while (< v 1.0) (setq v (* v 10.0)))
-      (while (>= v 10.0) (setq v (/ v 10.0)))
-      (or (< (abs (- v 1.0)) 0.01)
-          (< (abs (- v 2.0)) 0.02)
-          (< (abs (- v 5.0)) 0.05)))))
-
-(defun ap-guess-format-scale (w h / mn mx best bestk nm sw sh k)
-  (setq mn (float (min w h)) mx (float (max w h)))
-  (setq best nil bestk 1.0)
-  (foreach s *gost-formats*
+;;; Формат по размеру с допуском ±10%
+(defun ap-fmt-size (w h / mn mx tol res s nm sw sh)
+  (setq mn (float (min w h)) mx (float (max w h)) tol 0.10 res nil)
+  (foreach s *gost*
     (setq nm (car s) sw (cadr s) sh (caddr s))
-    (setq k (/ mn sw))
-    (if (and (ap-nice-scale-p k)
-             (< (abs (- (/ mx (max 0.0001 mn)) (/ sh sw))) 0.06))
-      (if (or (null best)
-              (< (abs (log k)) (abs (log bestk))))
-        (progn (setq best (cons nm k) bestk k)))))
-  best)
-
-(defun ap-detect-first-pair (bb-list / res bb w h r)
-  (setq res nil)
-  (foreach bb bb-list
-    (if (null res)
-      (progn
-        (setq w (caddr bb) h (cadddr bb))
-        (setq r (ap-guess-format-scale w h))
-        (if r (setq res r)))))
+    (if (and (null res)
+             (< (abs (- mn sw)) (* tol sw))
+             (< (abs (- mx sh)) (* tol sh)))
+      (setq res nm)))
   res)
 
-(defun ap-format-by-scale (w h k / mn mx tol result nm sw sh)
-  (setq mn (float (min w h)) mx (float (max w h)))
-  (setq tol 0.10 result nil)
-  (foreach s *gost-formats*
-    (setq nm (car s) sw (cadr s) sh (caddr s))
-    (if (and (null result)
-             (< (abs (- mn (* sw k))) (* tol sw k))
-             (< (abs (- mx (* sh k))) (* tol sh k)))
-      (setq result nm)))
-  result)
-(princ "[D5] formats OK\n")
+(defun ap-name-p (nm)
+  (wcmatch (strcase nm) "*РАМК*,*KPSP*,*ГОСТ*,*FRAME*,*ШТАМП*,*ЛИСТ А*"))
 
-;;; ---------- BBox / полилинии ----------
-(defun ap-get-bbox (obj / mn mx result)
-  (setq result
-    (ap-try "ap-get-bbox"
-      '(lambda ()
-         (vla-getboundingbox obj 'mn 'mx)
-         (setq mn (vlax-safearray->list mn) mx (vlax-safearray->list mx))
-         (if (and mn mx (numberp (car mn)) (numberp (car mx)))
-           (list mn mx
-                 (abs (- (car mx) (car mn)))
-                 (abs (- (cadr mx) (cadr mn))))))))
-  result)
+;;; BBox
+(defun ap-bbox (obj / mn mx r)
+  (setq r (ap-try "bbox"
+    '(lambda ()
+       (vla-getboundingbox obj 'mn 'mx)
+       (setq mn (vlax-safearray->list mn) mx (vlax-safearray->list mx))
+       (if (and mn mx (numberp (car mn)) (numberp (car mx)))
+         (list mn mx (abs (- (car mx) (car mn))) (abs (- (cadr mx) (cadr mn))))))))
+  r)
 
-(defun ap-is-closed-true (ent)
-  (let ((c (vl-catch-all-apply 'vla-get-Closed (list ent))))
-    (if (vl-catch-all-error-p c) nil
-      (or (eq c :vlax-true) (eq c 1) (eq c T)
-          (and (numberp c) (/= c 0))))))
+(defun ap-eff (obj / nm e)
+  (setq nm (vla-get-Name obj))
+  (setq e (vl-catch-all-apply 'vla-get-EffectiveName (list obj)))
+  (if (vl-catch-all-error-p e) nm (if e e nm)))
 
-(defun ap-count-closed (blk_name depth / ad br ent on cnt)
-  (setq cnt 0)
-  (if (<= depth 4)
-    (ap-try "ap-count-closed"
-      '(lambda ()
-         (setq ad (vla-get-ActiveDocument (vlax-get-acad-object)))
-         (setq br (vla-item (vla-get-Blocks ad) blk_name))
-         (vlax-for ent br
-           (setq on (vla-get-ObjectName ent))
-           (cond
-             ((wcmatch on "AcDb*Polyline")
-              (if (ap-is-closed-true ent) (setq cnt (1+ cnt))))
-             ((= on "AcDbBlockReference")
-              (setq cnt (+ cnt (ap-count-closed (vla-get-Name ent)
-                                                (1+ depth))))))))))
-  cnt)
+;;; Перекрытие BBox
+(defun ap-ovl (a b r / ax1 ay1 ax2 ay2 bx1 by1 bx2 by2 ix1 iy1 ix2 iy2 ia am)
+  (if (or (not (listp (nth 1 a))) (not (listp (nth 1 b)))) nil
+    (progn
+      (setq ax1 (car (nth 1 a)) ay1 (cadr (nth 1 a))
+            ax2 (car (nth 2 a)) ay2 (cadr (nth 2 a))
+            bx1 (car (nth 1 b)) by1 (cadr (nth 1 b))
+            bx2 (car (nth 2 b)) by2 (cadr (nth 2 b))
+            ix1 (max ax1 bx1) iy1 (max ay1 by1)
+            ix2 (min ax2 bx2) iy2 (min ay2 by2))
+      (if (or (<= ix2 ix1) (<= iy2 iy1)) nil
+        (progn
+          (setq ia (* (- ix2 ix1) (- iy2 iy1))
+                am (min (* (- ax2 ax1) (- ay2 ay1))
+                        (* (- bx2 bx1) (- by2 by1))))
+          (if (<= am 0.0) nil (>= (/ ia am) r)))))))
 
-(defun ap-reject-reason (fmt closed w h k)
-  (cond
-    ((null fmt)
-     (strcat "формат не распознан (w=" (rtos w 2 4)
-             " h=" (rtos h 2 4)
-             " k=" (rtos k 2 6)
-             " ratio=" (rtos (/ (max w h) (max 0.0001 (min w h))) 2 3) ")"))
-    ((< closed 2)
-     (strcat "замкнутых полилиний < 2 (closed=" (itoa closed) ")"))
-    (t "неизвестная причина")))
-(princ "[D6] bbox OK\n")
+;;; Собрать рамку из блока
+(defun ap-from-insert (obj / bb w h fmt nm enm o)
+  (setq bb (ap-bbox obj))
+  (if (and bb (setq fmt (ap-fmt-size (caddr bb) (cadddr bb))))
+    (progn
+      (setq nm (vla-get-Name obj) enm (ap-eff obj))
+      (if (or (ap-name-p nm) (ap-name-p enm))
+        (progn
+          (setq o (if (> (caddr bb) (cadddr bb)) "Альбомная" "Книжная"))
+          (list (strcat "Рамка " fmt " [" o "]")
+                (car bb) (cadr bb) fmt o (getvar "CTAB") 0))
+        (progn
+          (setq o (if (> (caddr bb) (cadddr bb)) "Альбомная" "Книжная"))
+          (list (strcat "Рамка " fmt " [" o "]")
+                (car bb) (cadr bb) fmt o (getvar "CTAB") 0))))
+    nil))
 
-;;; ---------- Модель ----------
-(defun ap-find-model ( / tab ss i ent obj bb w h fmt orient closed bb-list scale)
-  (setq tab (getvar "CTAB"))
-  (ap-dbg (strcat "ap-find-model: tab=" tab))
-  (setq ss (ssget "_X" (list (cons 410 tab) '(0 . "INSERT"))))
-  (setq bb-list '())
+;;; Собрать рамку из полилинии
+(defun ap-from-poly (obj / bb w h fmt o)
+  (setq bb (ap-bbox obj))
+  (if (and bb (setq fmt (ap-fmt-size (caddr bb) (cadddr bb))))
+    (progn
+      (setq o (if (> (caddr bb) (cadddr bb)) "Альбомная" "Книжная"))
+      (list (strcat "Полилиния " fmt " [" o "]")
+            (car bb) (cadr bb) fmt o (getvar "CTAB") 0))
+    nil))
+
+;;; Уникальные с округлением
+(defun ap-uniq (lst step / out v)
+  (setq out '())
+  (foreach v lst
+    (setq v (* step (fix (/ v step))))
+    (if (not (member v out)) (setq out (cons v out))))
+  out)
+
+;;; Проверка: 4 стороны прямоугольника
+(defun ap-4sides (lns x1 x2 y1 y2 tol / ht hb hl hr a b)
+  (setq ht nil hb nil hl nil hr nil)
+  (foreach ln lns
+    (setq a (car ln) b (cadr ln))
+    (if (and (< (abs (- (cadr a) y2)) tol) (< (abs (- (cadr b) y2)) tol)
+             (<= (- (min (car a) (car b)) x1) tol)
+             (<= (- x2 (max (car a) (car b))) tol))
+      (setq ht t))
+    (if (and (< (abs (- (cadr a) y1)) tol) (< (abs (- (cadr b) y1)) tol)
+             (<= (- (min (car a) (car b)) x1) tol)
+             (<= (- x2 (max (car a) (car b))) tol))
+      (setq hb t))
+    (if (and (< (abs (- (car a) x1)) tol) (< (abs (- (car b) x1)) tol)
+             (<= (- (min (cadr a) (cadr b)) y1) tol)
+             (<= (- y2 (max (cadr a) (cadr b))) tol))
+      (setq hl t))
+    (if (and (< (abs (- (car a) x2)) tol) (< (abs (- (car b) x2)) tol)
+             (<= (- (min (cadr a) (cadr b)) y1) tol)
+             (<= (- y2 (max (cadr a) (cadr b))) tol))
+      (setq hr t)))
+  (and ht hb hl hr))
+
+;;; Рамки из отрезков LINE
+(defun ap-from-lines ( / ss i ent lns xs ys x1 x2 y1 y2 w h fmt o out)
+  (setq ss (ssget "_X" (list (cons 410 (getvar "CTAB")) '(0 . "LINE"))))
+  (setq lns '() xs '() ys '() out '())
   (if ss
     (progn
-      (ap-dbg (strcat "  INSERT найдено: " (itoa (sslength ss))))
       (setq i 0)
       (repeat (sslength ss)
-        (setq ent (ssname ss i) obj (vlax-ename->vla-object ent))
-        (setq closed (ap-count-closed (vla-get-Name obj) 0))
-        (setq bb (ap-get-bbox obj))
-        (if (and bb (>= closed 2)) (setq bb-list (cons bb bb-list)))
+        (setq ent (ssname ss i))
+        (setq a (cdr (assoc 10 (entget ent)))
+              b (cdr (assoc 11 (entget ent))))
+        (setq lns (cons (list a b) lns))
+        (setq xs (cons (car a) (cons (car b) xs)))
+        (setq ys (cons (cadr a) (cons (cadr b) ys)))
         (setq i (1+ i)))))
-  (setq scale (ap-detect-first-pair bb-list))
-  (if scale
-    (progn
-      (setq *ap-scale* (cdr scale))
-      (ap-info (strcat "Масштаб определён: 1:"
-                       (rtos (/ 1.0 (cdr scale)) 2 3)
-                       " (k=" (rtos (cdr scale) 2 6)
-                       ", fmt=" (car scale) ")")))
-    (progn (setq *ap-scale* 1.0)
-           (ap-warn "Масштаб не определён — использую 1.0")))
+  (setq xs (ap-uniq xs 0.5) ys (ap-uniq ys 0.5))
+  (ap-d (strcat "  LINE: " (itoa (length lns))
+                ", X: " (itoa (length xs)) ", Y: " (itoa (length ys))))
+  (foreach x1 xs (foreach x2 xs
+    (if (> x2 x1)
+      (progn
+        (setq w (- x2 x1))
+        (foreach y1 ys (foreach y2 ys
+          (if (> y2 y1)
+            (progn
+              (setq h (- y2 y1))
+              (setq fmt (ap-fmt-size w h))
+              (if (and fmt (ap-4sides lns x1 x2 y1 y2 0.5))
+                (progn
+                  (setq o (if (> w h) "Альбомная" "Книжная"))
+                  (setq out (cons (list (strcat "LINE " fmt " [" o "]")
+                                        (list x1 y1) (list x2 y2)
+                                        fmt o (getvar "CTAB") 0) out))))))))))))
+  out)
+
+;;; Собрать все рамки вкладки
+(defun ap-collect ( / tab ss i ent obj fd res)
+  (setq tab (getvar "CTAB") res '())
+  ;; INSERT
+  (setq ss (ssget "_X" (list (cons 410 tab) '(0 . "INSERT"))))
   (if ss
     (progn
+      (ap-d (strcat "INSERT: " (itoa (sslength ss))))
       (setq i 0)
       (repeat (sslength ss)
         (setq ent (ssname ss i) obj (vlax-ename->vla-object ent))
-        (setq closed (ap-count-closed (vla-get-Name obj) 0))
-        (setq bb (ap-get-bbox obj))
-        (if (and bb (>= closed 2))
-          (progn
-            (setq w (caddr bb) h (cadddr bb))
-            (setq fmt (ap-format-by-scale w h *ap-scale*))
-            (ap-trc (strcat "  INSERT '" (vla-get-Name obj)
-                            "' w=" (rtos w 2 4) " h=" (rtos h 2 4)
-                            " closed=" (itoa closed)
-                            " fmt=" (if fmt fmt "nil")))
-            (if fmt
-              (progn
-                (setq orient (if (> w h) "Альбомная" "Книжная"))
-                (setq *ap-frame-data*
-                      (cons (list (strcat "Модель: " fmt " [" orient "]")
-                                  (car bb) (cadr bb) fmt orient "Model" 0)
-                            *ap-frame-data*))
-                (setq *ap-frames* (cons fmt *ap-frames*)))
-              (ap-dbg (strcat "  Отклонена: "
-                              (ap-reject-reason fmt closed w h *ap-scale*))))))
-        (setq i (1+ i))))))
-(princ "[D7] ap-find-model OK\n")
-
-;;; ---------- Лист ----------
-(defun ap-find-current ( / tab ss i ent obj on bb w h fmt orient
-                          closed cnt total rejected bb-list scale)
-  (setq tab (getvar "CTAB"))
-  (ap-dbg (strcat "ap-find-current: tab=" tab))
+        (setq fd (ap-from-insert obj))
+        (if fd (progn (setq res (cons fd res)) (ap-t (strcat "  + " (car fd)))))
+        (setq i (1+ i)))))
+  ;; POLYLINE
   (setq ss (ssget "_X" (list (cons 410 tab)
                              '(-4 . "<OR") '(0 . "LWPOLYLINE")
-                             '(0 . "POLYLINE") '(0 . "INSERT")
-                             '(-4 . "OR>"))))
-  (setq cnt 0 total 0 rejected 0 bb-list '())
+                             '(0 . "POLYLINE") '(-4 . "OR>"))))
   (if ss
     (progn
-      (ap-dbg (strcat "  Объектов на листе: " (itoa (sslength ss))))
+      (ap-d (strcat "Полилиний: " (itoa (sslength ss))))
       (setq i 0)
       (repeat (sslength ss)
-        (setq ent (ssname ss i)
-              obj (vlax-ename->vla-object ent)
-              on (vl-catch-all-apply 'vla-get-ObjectName (list obj)))
-        (if (vl-catch-all-error-p on) (setq on "?"))
-        (cond
-          ((or (= on "AcDbPolyline") (= on "AcDb2dPolyline"))
-           (setq closed (ap-is-closed-true obj))
-           (setq bb (ap-get-bbox obj))
-           (if (and bb closed) (setq bb-list (cons bb bb-list))))
-          ((= on "AcDbBlockReference")
-           (setq closed (ap-count-closed (vla-get-Name obj) 0))
-           (setq bb (ap-get-bbox obj))
-           (if (and bb (>= closed 2)) (setq bb-list (cons bb bb-list)))))
-        (setq i (1+ i)))
-      (setq scale (ap-detect-first-pair bb-list))
-      (if scale
-        (progn
-          (setq *ap-scale* (cdr scale))
-          (ap-info (strcat "Масштаб определён: 1:"
-                           (rtos (/ 1.0 (cdr scale)) 2 3)
-                           " (k=" (rtos (cdr scale) 2 6)
-                           ", fmt=" (car scale) ")")))
-        (progn (setq *ap-scale* 1.0)
-               (ap-warn "Масштаб не определён — использую 1.0")))
-      (setq i 0)
-      (repeat (sslength ss)
-        (setq ent (ssname ss i)
-              obj (vlax-ename->vla-object ent)
-              on (vl-catch-all-apply 'vla-get-ObjectName (list obj)))
-        (if (vl-catch-all-error-p on) (setq on "?"))
-        (setq total (1+ total))
-        (cond
-          ((or (= on "AcDbPolyline") (= on "AcDb2dPolyline"))
-           (setq closed (ap-is-closed-true obj))
-           (setq bb (ap-get-bbox obj))
-           (if bb
-             (progn
-               (setq w (caddr bb) h (cadddr bb))
-               (setq fmt (ap-format-by-scale w h *ap-scale*))
-               (if (and closed fmt)
-                 (progn
-                   (setq orient (if (> w h) "Альбомная" "Книжная"))
-                   (setq *ap-frame-data*
-                         (cons (list (strcat "Лист " tab ": " fmt " [" orient "]")
-                                     (car bb) (cadr bb) fmt orient tab 0)
-                               *ap-frame-data*))
-                   (setq *ap-frames* (cons fmt *ap-frames*))
-                   (setq cnt (1+ cnt)))
-                 (setq rejected (1+ rejected))))))
-          ((= on "AcDbBlockReference")
-           (setq bb (ap-get-bbox obj))
-           (if bb
-             (progn
-               (setq w (caddr bb) h (cadddr bb))
-               (setq closed (ap-count-closed (vla-get-Name obj) 0))
-               (setq fmt (ap-format-by-scale w h *ap-scale*))
-               (ap-trc (strcat "    INSERT '" (vla-get-Name obj)
-                               "' w=" (rtos w 2 4) " h=" (rtos h 2 4)
-                               " closed=" (itoa closed)
-                               " fmt=" (if fmt fmt "nil")))
-               (if (and fmt (>= closed 2))
-                 (progn
-                   (setq orient (if (> w h) "Альбомная" "Книжная"))
-                   (setq *ap-frame-data*
-                         (cons (list (strcat "Лист " tab ": " fmt " [" orient "]")
-                                     (car bb) (cadr bb) fmt orient tab 0)
-                               *ap-frame-data*))
-                   (setq *ap-frames* (cons fmt *ap-frames*))
-                   (setq cnt (1+ cnt)))
-                 (setq rejected (1+ rejected)))))))
+        (setq ent (ssname ss i) obj (vlax-ename->vla-object ent))
+        (setq fd (ap-from-poly obj))
+        (if fd (progn (setq res (cons fd res)) (ap-t (strcat "  + " (car fd)))))
         (setq i (1+ i)))))
-  (ap-info (strcat "Принято: " (itoa cnt) ", отклонено: " (itoa rejected)
-                   ", всего: " (itoa total)))
-  (princ (strcat "Принято: " (itoa cnt) ", отклонено: " (itoa rejected)
-                 ", всего: " (itoa total) "\n")))
-(princ "[D8] ap-find-current OK\n")
+  ;; LINE
+  (setq res (append res (ap-from-lines)))
+  res)
 
-;;; ---------- Дедупликация ----------
-(defun ap-bbox-equal (a b tol / mn-a mx-a mn-b mx-b)
-  (setq mn-a (nth 1 a) mx-a (nth 2 a)
-        mn-b (nth 1 b) mx-b (nth 2 b))
-  (and (listp mn-a) (listp mx-a) (listp mn-b) (listp mx-b)
-       (< (abs (- (car mn-a) (car mn-b))) tol)
-       (< (abs (- (cadr mn-a) (cadr mn-b))) tol)
-       (< (abs (- (car mx-a) (car mx-b))) tol)
-       (< (abs (- (cadr mx-a) (cadr mx-b))) tol)))
+;;; Дедупликация
+(defun ap-dedup ( / ins pols seen out fd)
+  (setq ins '() pols '())
+  (foreach fd *ap-frames*
+    (if (wcmatch (car fd) "Рамка*") (setq ins (cons fd ins))
+      (setq pols (cons fd pols))))
+  (setq pols (vl-remove-if
+    '(lambda (p) (vl-some '(lambda (i) (ap-ovl p i 0.80)) ins)) pols))
+  (setq seen '())
+  (setq pols (vl-remove-if
+    '(lambda (p)
+       (if (vl-some '(lambda (s) (ap-ovl p s 0.95)) seen) t
+         (progn (setq seen (cons p seen)) nil))) pols))
+  (setq out (append ins pols))
+  (vl-sort out '(lambda (a b)
+    (if (< (abs (- (cadr (cadr a)) (cadr (cadr b)))) 1.0)
+      (< (car (cadr a)) (car (cadr b)))
+      (> (cadr (cadr a)) (cadr (cadr b)))))))
 
-(defun ap-dedup-frames ( / out seen fd)
-  (setq out '())
-  (foreach fd *ap-frame-data*
-    (if (not (vl-some '(lambda (x) (ap-bbox-equal x fd 1.0)) seen))
-      (progn (setq seen (cons fd seen)) (setq out (cons fd out)))))
-  (setq *ap-frame-data* (reverse out))
-  (ap-dbg (strcat "После дедупликации: " (itoa (length *ap-frame-data*)))))
+;;; Найти все рамки на вкладке
+(defun ap-find ( / res)
+  (setq res (ap-collect))
+  (setq *ap-frames* (ap-dedup))
+  (ap-d (strcat "Итого рамок: " (itoa (length *ap-frames*))))
+  *ap-frames*)
 
-(defun ap-find-all ()
-  (setq *ap-frame-data* '() *ap-frames* '())
-  (if (= 1 (getvar "TILEMODE")) (ap-find-model) (ap-find-current))
-  (ap-dedup-frames))
-(princ "[D9] ap-find-all OK\n")
-
-;;; ---------- DCL ----------
-(defun ap-update-list ( / fd)
-  (start_list "frames")
-  (foreach fd (reverse *ap-frame-data*)
-    (if (and fd (car fd))
-      (add_list (strcat (if (= (nth 6 fd) 1) "[ ] " "[X] ") (car fd)))))
-  (end_list))
-
-(defun ap-create-dcl ( / dcl_file f)
-  (setq dcl_file (vl-filename-mktemp "ap" nil ".dcl"))
-  (setq f (open dcl_file "w"))
-  (write-line "ap_dialog:dialog{" f)
-  (write-line "label=\"AutoPlot v157.0\";" f)
-  (write-line ":list_box{key=\"frames\";" f)
-  (write-line "label=\"Список рамок ([X] — печатать, [ ] — пропустить):\";" f)
-  (write-line "height=14;width=80;" f)
-  (write-line "multiple_select=true;" f)
-  (write-line "}" f)
-  (write-line ":row{" f)
-  (write-line ":button{key=\"remove\";label=\"Убрать\";}" f)
-  (write-line ":button{key=\"toggle\";label=\"Вкл/Выкл\";}" f)
-  (write-line "}" f)
-  (write-line ":row{" f)
-  (write-line ":button{key=\"print\";label=\"ПЕЧАТЬ В PDF\";is_default=true;}" f)
-  (write-line ":button{key=\"cancel\";label=\"Закрыть\";is_cancel=true;}" f)
-  (write-line "}" f)
-  (write-line ":text{key=\"status\";label=\"\";}" f)
-  (write-line "}" f)
-  (close f)
-  dcl_file)
-(princ "[D10] dcl OK\n")
-
-;;; ---------- Печать ----------
-(defun ap-plot-full (tab fmt orient pt1 pt2 pdf / ok old-fd old-cd)
-  (setq ok nil)
+;;; Печать
+(defun ap-plot (tab fmt orient pt1 pt2 pdf / ok ofd ocd)
   (if (findfile pdf) (vl-file-delete pdf))
-  (setq old-fd (getvar "FILEDIA") old-cd (getvar "CMDDIA"))
+  (setq ofd (getvar "FILEDIA") ocd (getvar "CMDDIA"))
   (setvar "FILEDIA" 0) (setvar "CMDDIA" 0)
-  (ap-info (strcat "PLOT tab=" tab " fmt=" fmt " -> " pdf))
-  (ap-send "_.-PLOT")
-  (ap-send "Да") (ap-send tab) (ap-send "DWG To PDF.pc3")
-  (ap-send fmt) (ap-send "Миллиметры") (ap-send orient)
-  (ap-send "Нет") (ap-send "Рамка") (ap-send pt1) (ap-send pt2)
-  (ap-send "Вписать") (ap-send "Центрировать")
-  (ap-send "Да") (ap-send "") (ap-send "Нет") (ap-send "Нет")
-  (ap-send "Нет") (ap-send "Нет") (ap-send pdf)
-  (ap-send "Нет") (ap-send "Да")
-  (setvar "FILEDIA" old-fd) (setvar "CMDDIA" old-cd)
-  (if (findfile pdf)
-    (progn (ap-dbg (strcat "PDF создан: " pdf)) (setq ok t))
-    (ap-err (strcat "PDF не создан: " pdf)))
-  ok)
+  (ap-i (strcat "PLOT " tab " / " fmt " -> " pdf))
+  (vl-cmdf "_.-PLOT" "Да" tab "DWG To PDF.pc3" fmt "Миллиметры" orient
+           "Нет" "Рамка" pt1 pt2 "1:1" "Центрировать"
+           "Да" "" "Нет" "Нет" "Нет" "Нет" pdf "Нет" "Да")
+  (setvar "FILEDIA" ofd) (setvar "CMDDIA" ocd)
+  (if (findfile pdf) (progn (ap-d (strcat "PDF: " pdf)) t)
+    (progn (ap-e (strcat "Нет PDF: " pdf)) nil)))
 
-(defun ap-print-one-frame (fd dir i / mn mx fmt orient tab st pt1 pt2 pdf dx dy)
+(defun ap-print-frame (fd dir i / mn mx fmt o tab st pt1 pt2 pdf)
   (if (null fd) nil
     (progn
       (setq mn (cadr fd) mx (caddr fd)
-            fmt (nth 3 fd) orient (nth 4 fd)
-            tab (nth 5 fd) st (nth 6 fd))
+            fmt (nth 3 fd) o (nth 4 fd) tab (nth 5 fd) st (nth 6 fd))
       (if (/= st 0) nil
         (progn
-          (setq dx (* 0.01 (- (car mx) (car mn)))
-                dy (* 0.01 (- (cadr mx) (cadr mn))))
-          (setq pt1 (strcat (rtos (- (car mn) dx) 2 4) ","
-                            (rtos (- (cadr mn) dy) 2 4)))
-          (setq pt2 (strcat (rtos (+ (car mx) dx) 2 4) ","
-                            (rtos (+ (cadr mx) dy) 2 4)))
-          (setq pdf (strcat dir "\\" (ap-format-num i) ".pdf"))
-          (ap-plot-full tab (ap-format-full fmt) orient pt1 pt2 pdf))))))
+          (setq pt1 (strcat (rtos (car mn) 2 4) "," (rtos (cadr mn) 2 4))
+                pt2 (strcat (rtos (car mx) 2 4) "," (rtos (cadr mx) 2 4))
+                pdf (strcat dir "\\" (ap-fmt-num i) ".pdf"))
+          (ap-plot tab (ap-fmt-full fmt) o pt1 pt2 pdf))))))
 
-(defun ap-do-print ( / path dir prefix i fd pdf ok err total counter)
+(defun ap-print-all ( / path dir pfx i fd ok err)
   (setq ok 0 err 0 i 0)
   (setq path (getfiled "Сохранить PDF" "" "pdf" 1))
-  (if (null path)
-    (progn (ap-warn "Путь не выбран.") (princ "\nПуть не выбран."))
+  (if (null path) (princ "\nПуть не выбран.")
     (progn
-      (setq dir (vl-filename-directory path))
-      (setq prefix (vl-filename-base (getvar "DWGNAME")))
-      (if (= prefix "") (setq prefix "Drawing"))
+      (setq dir (vl-filename-directory path)
+            pfx (vl-filename-base (getvar "DWGNAME")))
+      (if (= pfx "") (setq pfx "Drawing"))
       (setvar "BACKGROUNDPLOT" 0)
-      (setq total (length *ap-frame-data*))
-      (ap-info (strcat "=== ПЕЧАТЬ: " (itoa total) " ==="))
-      (ap-info (strcat "Папка: " dir))
-      (princ (strcat "\n=== ПЕЧАТЬ: " (itoa total) " ===\n"))
-      (foreach fd *ap-frame-data*
+      (ap-i (strcat "=== ПЕЧАТЬ: " (itoa (length *ap-frames*)) " ==="))
+      (foreach fd *ap-frames*
         (setq i (1+ i))
-        (setq counter (nth 6 fd))
-        (if (= counter 1)
+        (if (= (nth 6 fd) 1) (ap-d (strcat "[" (itoa i) "] пропуск"))
           (progn
-            (ap-dbg (strcat "[" (itoa i) "] пропущена"))
-            (princ (strcat "[" (itoa i) "] пропущена\n")))
-          (progn
-            (setq pdf (strcat dir "\\" prefix "_"
-                              (ap-format-num (1+ ok)) ".pdf"))
             (princ (strcat "[" (itoa i) "] "))
-            (if (ap-print-one-frame fd dir i)
-              (progn (ap-info (strcat "[" (itoa i) "] OK — " pdf))
-                     (princ (strcat "OK — " pdf "\n"))
-                     (setq ok (1+ ok)))
-              (progn (ap-err (strcat "[" (itoa i) "] ОШИБКА — файл не создан"))
-                     (princ "ОШИБКА — файл не создан\n")
-                     (setq err (1+ err)))))))
-      (ap-info (strcat "=== ГОТОВО: OK=" (itoa ok) " ERR=" (itoa err) " ==="))
-      (ap-info (strcat "Папка: " dir))
-      (princ (strcat "\n=== ГОТОВО: OK=" (itoa ok) " ERR=" (itoa err) " ===\n"))
-      (ap-save-log))))
+            (if (ap-print-frame fd dir i)
+              (progn (ap-i (strcat "[" (itoa i) "] OK"))
+                     (princ "OK\n") (setq ok (1+ ok)))
+              (progn (ap-e (strcat "[" (itoa i) "] ERR"))
+                     (princ "ERR\n") (setq err (1+ err)))))))
+      (ap-i (strcat "=== ИТОГ: OK=" (itoa ok) " ERR=" (itoa err) " ==="))
+      (princ (strcat "\n=== ИТОГ: OK=" (itoa ok) " ERR=" (itoa err) " ===\n"))
+      (ap-save *log-path* *log-buf*))))
 
-(defun ap-do-remove ( / sel idx)
-  (setq sel (get_tile "frames"))
-  (if (/= sel "")
-    (progn
-      (setq sel (read (strcat "(" sel ")")))
-      (foreach idx (reverse sel)
-        (setq *ap-frames* (vl-remove (nth idx *ap-frames*) *ap-frames*)
-              *ap-frame-data* (vl-remove (nth idx *ap-frame-data*) *ap-frame-data*)))
-      (ap-update-list)
-      (set_tile "status" (strcat "Осталось: " (itoa (length *ap-frames*)))))))
-
-(defun ap-do-toggle-list ( / sel idx fd)
-  (setq sel (get_tile "frames"))
-  (if (/= sel "")
-    (progn
-      (setq sel (read (strcat "(" sel ")")))
-      (foreach idx (reverse sel)
-        (setq fd (nth idx *ap-frame-data*))
-        (if fd
-          (setq *ap-frame-data*
-                (subst (append (list (nth 0 fd) (nth 1 fd) (nth 2 fd)
-                                     (nth 3 fd) (nth 4 fd) (nth 5 fd)
-                                     (if (= (nth 6 fd) 0) 1 0)))
-                       fd *ap-frame-data*))))
-      (ap-update-list)
-      (set_tile "status" "Статус обновлён"))))
-(princ "[D11] print OK\n")
-
-;;; ---------- Команды ----------
-(defun c:AUTOPLOT ( / dcl_file dcl_id result)
+;;; ---------- AUTOPLOT ----------
+(defun c:AUTOPLOT ( / )
   (vl-load-com)
-  (setq *log-buffer* '() *log-counts* '(0 0 0 0 0) *log-errors* '())
-  (setq *log-level* 4)
-  (ap-info "========================================")
-  (ap-info (strcat "AutoPlot v157.0 — лог "
-                   (menucmd "M=$(edtime,$(getvar,date),DD.MM.YYYY HH:MM:SS)")))
-  (ap-info "========================================")
-  (setq *ap-frames* '() *ap-frame-data* '())
-  (ap-find-all)
+  (setq *log-buf* '() *log-lvl* 4)
+  (ap-i "========================================")
+  (ap-i (strcat "AutoPlot v157.7 — "
+                (menucmd "M=$(edtime,$(getvar,date),DD.MM.YYYY HH:MM:SS)")))
+  (ap-i "========================================")
+  (ap-find)
   (if (= (length *ap-frames*) 0)
-    (progn
-      (ap-warn "Рамки не найдены на активной вкладке.")
-      (princ "\nРамки не найдены на активной вкладке.\n"))
-    (progn
-      (setq dcl_file (ap-create-dcl))
-      (setq dcl_id (load_dialog dcl_file))
-      (if (new_dialog "ap_dialog" dcl_id)
-        (progn
-          (ap-update-list)
-          (set_tile "status" (strcat "Найдено: " (itoa (length *ap-frames*))))
-          (action_tile "remove" "(ap-do-remove)")
-          (action_tile "toggle" "(ap-do-toggle-list)")
-          (action_tile "print" "(done_dialog 1)")
-          (action_tile "cancel" "(done_dialog 0)")
-          (setq result (start_dialog))
-          (unload_dialog dcl_id)
-          (if (= result 1) (ap-do-print)))
-        (progn (ap-err "Не удалось открыть диалог.")
-               (princ "\nНе удалось открыть диалог.")))
-      (vl-file-delete dcl_file)))
-  (ap-save-log)
+    (progn (ap-w 1 "Рамки не найдены.") (princ "\nРамки не найдены.\n"))
+    (ap-print-all))
   (princ))
-(princ "[D12] c:AUTOPLOT OK\n")
 
-(defun c:APFRAMES ( / tab tile ss i ent obj on bb w h fmt closed
-                      cnt_ins cnt_lwp cnt_pol cnt_line
-                      ok_cnt rej_cnt nm enm cur name_map scale r)
-  (setq *diag-buffer* '())
+;;; ---------- APFRAMES ----------
+(defun c:APFRAMES ( / tab ss i ent obj nm enm bb w h fmt ok rej)
+  (setq *diag-buf* '())
   (ap-diag "========================================")
-  (ap-diag " APFRAMES — диагностика рамок")
+  (ap-diag " APFRAMES v157.7")
   (ap-diag (strcat " " (menucmd "M=$(edtime,$(getvar,date),DD.MM.YYYY HH:MM:SS)")))
   (ap-diag "========================================")
-  (setq tab (getvar "CTAB") tile (getvar "TILEMODE"))
-  (ap-diag (strcat "Активная вкладка: " tab))
-  (ap-diag (strcat "TILEMODE: " (itoa tile)
-                   " (" (if (= tile 1) "Модель" "Лист") ")"))
-  (ap-diag (strcat "INSUNITS: " (itoa (getvar "INSUNITS"))))
-  (ap-diag (strcat "LUNITS: "   (itoa (getvar "LUNITS"))))
-  (ap-diag (strcat "LUPREC: "   (itoa (getvar "LUPREC"))))
-  (ap-diag (strcat "DIMSCALE: " (rtos (getvar "DIMSCALE") 2 4)))
-  (ap-diag (strcat "CANNOSCALE: " (getvar "CANNOSCALE")))
-  (ap-diag "")
-  (setq ss (ssget "_X" (list (cons 410 tab))))
-  (ap-diag (strcat "Всего объектов на вкладке: "
-                   (if ss (itoa (sslength ss)) "0")))
+  (setq tab (getvar "CTAB"))
+  (ap-diag (strcat "Вкладка: " tab
+                   " TILEMODE=" (itoa (getvar "TILEMODE"))))
   (setq ss (ssget "_X" (list (cons 410 tab) '(0 . "INSERT"))))
-  (setq cnt_ins (if ss (sslength ss) 0))
-  (setq ss (ssget "_X" (list (cons 410 tab) '(0 . "LWPOLYLINE"))))
-  (setq cnt_lwp (if ss (sslength ss) 0))
-  (setq ss (ssget "_X" (list (cons 410 tab) '(0 . "POLYLINE"))))
-  (setq cnt_pol (if ss (sslength ss) 0))
-  (setq ss (ssget "_X" (list (cons 410 tab) '(0 . "LINE"))))
-  (setq cnt_line (if ss (sslength ss) 0))
-  (ap-diag (strcat "  INSERT:     " (itoa cnt_ins)))
-  (ap-diag (strcat "  LWPOLYLINE: " (itoa cnt_lwp)))
-  (ap-diag (strcat "  POLYLINE:   " (itoa cnt_pol)))
-  (ap-diag (strcat "  LINE:       " (itoa cnt_line)))
-  (ap-diag "")
-  (ap-diag "--- РАЗБОР ВСТАВОК ---")
-  (setq ok_cnt 0 rej_cnt 0 name_map '())
-  (setq ss (ssget "_X" (list (cons 410 tab) '(0 . "INSERT"))))
+  (ap-diag (strcat "INSERT: " (if ss (itoa (sslength ss)) "0")))
+  (setq ok 0 rej 0)
   (if ss
     (progn
       (setq i 0)
       (repeat (sslength ss)
         (setq ent (ssname ss i) obj (vlax-ename->vla-object ent))
-        (setq nm (vla-get-Name obj))
-        (setq enm (vl-catch-all-apply 'vla-get-EffectiveName (list obj)))
-        (if (vl-catch-all-error-p enm) (setq enm nm))
-        (setq bb (ap-get-bbox obj))
+        (setq nm (vla-get-Name obj) enm (ap-eff obj) bb (ap-bbox obj))
         (if bb
           (progn
-            (setq w (caddr bb) h (cadddr bb))
-            (setq closed (ap-count-closed nm 0))
-            (setq r (ap-guess-format-scale w h))
-            (setq fmt (if r (car r) nil))
-            (ap-diag (strcat "  [" (itoa (1+ i)) "] name='" nm "'"
-                             (if (and enm (/= enm nm))
-                               (strcat " eff='" enm "'") "")
+            (setq w (caddr bb) h (cadddr bb) fmt (ap-fmt-size w h))
+            (ap-diag (strcat "  [" (itoa (1+ i)) "] '" nm "'"
+                             (if (and enm (/= enm nm)) (strcat " eff='" enm "'") "")
                              " w=" (rtos w 2 4) " h=" (rtos h 2 4)
-                             " closed=" (itoa closed)
-                             " fmt=" (if fmt fmt "nil")
-                             " k=" (if r (rtos (cdr r) 2 6) "nil")))
-            (if (and fmt (>= closed 2))
-              (setq ok_cnt (1+ ok_cnt))
-              (setq rej_cnt (1+ rej_cnt)))
-            (setq cur (assoc nm name_map))
-            (if cur
-              (setq name_map (subst (cons nm (1+ (cdr cur))) cur name_map))
-              (setq name_map (cons (cons nm 1) name_map))))
-          (ap-diag (strcat "  [" (itoa (1+ i)) "] '" nm "' — нет BBox")))
+                             " fmt=" (if fmt fmt "nil")))
+            (if fmt (setq ok (1+ ok)) (setq rej (1+ rej)))))
         (setq i (1+ i)))))
-  (ap-diag "")
-  (ap-diag (strcat "Итого по эвристике: принято " (itoa ok_cnt)
-                   ", отклонено " (itoa rej_cnt)))
-  (ap-diag "")
-  (ap-diag "--- СВОДКА ПО ИМЕНАМ БЛОКОВ ---")
-  (foreach pair name_map
-    (ap-diag (strcat "  " (car pair) " × " (itoa (cdr pair)))))
-  (ap-diag "")
-  (ap-diag "--- ОПРЕДЕЛЕНИЯ БЛОКОВ (closed) ---")
-  (foreach pair name_map
-    (ap-diag (strcat "  '" (car pair) "' — замкнутых: "
-                     (itoa (ap-count-closed (car pair) 0)))))
-  (ap-diag "")
-  (ap-diag "--- РЕЗУЛЬТАТ ap-find-all ---")
-  (setq *ap-frames* '() *ap-frame-data* '())
-  (ap-find-all)
-  (ap-diag (strcat "  Найдено рамок: " (itoa (length *ap-frames*))))
-  (ap-diag (strcat "  Масштаб: " (rtos *ap-scale* 2 6)))
-  (foreach fd *ap-frame-data*
-    (ap-diag (strcat "    " (car fd)
-                     "  bbox=" (vl-princ-to-string (cadr fd))
-                     " .. " (vl-princ-to-string (caddr fd)))))
-  (ap-diag "")
-  (ap-diag "=== КОНЕЦ APFRAMES ===")
-  (ap-save-diag)
-  (princ "\n=== APFRAMES завершён ===\n")
+  (ap-diag (strcat "Блоков-рамок: " (itoa ok)
+                   " отклонено: " (itoa rej)))
+  (setq ss (ssget "_X" (list (cons 410 tab)
+                             '(-4 . "<OR") '(0 . "LWPOLYLINE")
+                             '(0 . "POLYLINE") '(-4 . "OR>"))))
+  (ap-diag (strcat "Полилиний: " (if ss (itoa (sslength ss)) "0")))
+  (ap-diag "--- РЕЗУЛЬТАТ ap-find ---")
+  (ap-find)
+  (ap-diag (strcat "Найдено рамок: " (itoa (length *ap-frames*))))
+  (foreach fd *ap-frames*
+    (ap-diag (strcat "  " (car fd))))
+  (ap-save *diag-path* *diag-buf*)
+  (princ "\n=== APFRAMES готов ===\n")
   (princ))
-(princ "[D13] c:APFRAMES OK\n")
-
-(defun c:APDIAG ()
-  (princ "\nAPDIAG: используйте APFRAMES для отчёта и AUTOPLOT для печати.\n")
-  (princ))
-(princ "[D14] c:APDIAG OK\n")
-
-(defun c:APLOG ()
-  (ap-save-log)
-  (princ (strcat "\nЛог сохранён: " *log-path* "\n"))
-  (princ))
-(princ "[D15] c:APLOG OK\n")
-
-(defun c:APDEBUG ( / s lvl)
-  (initget 1 "0 1 2 3 4")
-  (setq s (getkword "\nУровень лога [0-ERROR/1-WARN/2-INFO/3-DEBUG/4-TRACE]: "))
-  (if s
-    (progn
-      (setq lvl (atoi s))
-      (setq *log-level* lvl)
-      (princ (strcat "\nУровень лога: " (ap-level-name lvl) "\n"))))
-  (princ))
-(princ "[D16] c:APDEBUG OK\n")
 
 (princ "\n========================================\n")
-(princ "  AutoPlot Pro v157.0 — загружен\n")
+(princ "  AutoPlot Pro v157.7 — загружен\n")
 (princ (strcat "  Лог: " *log-path* "\n"))
-(princ "  Команды: AUTOPLOT, APFRAMES, APDIAG, APLOG, APDEBUG\n")
+(princ "  Команды: AUTOPLOT, APFRAMES\n")
 (princ "========================================\n")
 (princ)
